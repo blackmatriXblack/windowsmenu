@@ -1,0 +1,23 @@
+#include <windows.h>
+
+100 DIALOGEX 0, 0, 380, 240
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Ultimate Windows Control Panel"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    PUSHBUTTON      "System Properties", 101, 10, 10, 110, 25
+    PUSHBUTTON      "Device Manager", 102, 130, 10, 110, 25
+    PUSHBUTTON      "Disk Management", 103, 250, 10, 110, 25
+    PUSHBUTTON      "Services", 104, 10, 40, 110, 25
+    PUSHBUTTON      "Task Scheduler", 105, 130, 40, 110, 25
+    PUSHBUTTON      "Event Viewer", 106, 250, 40, 110, 25
+    PUSHBUTTON      "Registry Editor", 107, 10, 70, 110, 25
+    PUSHBUTTON      "System Information", 108, 130, 70, 110, 25
+    PUSHBUTTON      "System Configuration", 109, 250, 70, 110, 25
+    PUSHBUTTON      "Task Manager", 110, 10, 100, 110, 25
+    PUSHBUTTON      "Command Prompt", 111, 130, 100, 110, 25
+    PUSHBUTTON      "PowerShell", 112, 250, 100, 110, 25
+    PUSHBUTTON      "Settings", 113, 10, 130, 110, 25
+    PUSHBUTTON      "Control Panel", 114, 130, 130, 110, 25
+    PUSHBUTTON      "Exit", 115, 250, 130, 110, 25
+END
