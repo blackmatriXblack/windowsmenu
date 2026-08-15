@@ -1,20 +1,31 @@
-cmake_minimum_required(VERSION 4.0)
-project(programs C)
+cmake_minimum_required(VERSION 3.10)
+project(WindowsControlCenter C)
 
-set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# 允许编译 Windows 资源文件
-if(WIN32)
-    set(CMAKE_RC_COMPILER windres)
-    set(RESOURCE_FILE ${CMAKE_CURRENT_SOURCE_DIR}/resource.rc)
-    # 生成 .o 目标文件
-    add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/resource.o
-            COMMAND windres ${RESOURCE_FILE} -o ${CMAKE_CURRENT_BINARY_DIR}/resource.o
-            DEPENDS ${RESOURCE_FILE}
-    )
-    set(EXTRA_RESOURCES ${CMAKE_CURRENT_BINARY_DIR}/resource.o)
+if(NOT WIN32)
+    message(FATAL_ERROR "This project is Windows-only (pure Win32 API).")
 endif()
 
-add_executable(programs main.c
-        resource.rc ${EXTRA_RESOURCES})
+add_executable(WindowsControl WIN32 windowscontrol.c)
+
+target_link_libraries(WindowsControl
+    shell32
+    advapi32
+    user32
+    powrprof
+    ole32
+    uuid
+    gdi32
+    winmm
+    comdlg32
+    ws2_32
+    winhttp
+    iphlpapi
+    crypt32
+)
+
+set_target_properties(WindowsControl PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
