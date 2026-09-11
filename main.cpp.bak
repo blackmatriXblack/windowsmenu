@@ -1,0 +1,569 @@
+#include <QtWidgets>
+#include <QApplication>
+#include <QStyle>
+#include <QStyleHints>
+#include <windows.h>
+#include <cstring>
+#include <cstdio>
+#include <vector>
+
+extern "C" {
+    int QcCategoryCount(void);
+    const char *QcCategoryName(int);
+    int QcCategoryCommandCount(int);
+    const char *QcCommandName(int, int);
+    const char *QcCommandDesc(int, int);
+    int QcCommandNeedsArg(int, int);
+    const char *QcCommandDetail(int, int);
+    int QcTotalCommands(void);
+    void QcRunCommand(int, int, const char *);
+    void QcSample(void);
+    double QcCpuPct(void);
+    double QcRamPct(void);
+    double QcDiskPct(void);
+    double QcNetDown(void);
+    double QcNetUp(void);
+    const char *QcUptime(void);
+    void QcOpenTool(int);
+    void QcTermExec(const char *, void (*)(const char *));
+    extern int g_qcTermClose;
+}
+
+static const char *APP_TITLE = "Windows Control Center";
+
+struct CmdRef {
+    int cat;
+    int idx;
+    QString name;
+    QString desc;
+    bool needsArg;
+    QString detail;
+};
+
+static QPalette makePalette(bool dark) {
+    QPalette p;
+    if (dark) {
+        p.setColor(QPalette::Window, QColor(0x20, 0x20, 0x20));
+        p.setColor(QPalette::WindowText, QColor(0xf0, 0xf0, 0xf0));
+        p.setColor(QPalette::Base, QColor(0x2b, 0x2b, 0x2b));
+        p.setColor(QPalette::AlternateBase, QColor(0x30, 0x30, 0x30));
+        p.setColor(QPalette::Text, QColor(0xf0, 0xf0, 0xf0));
+        p.setColor(QPalette::Button, QColor(0x33, 0x33, 0x33));
+        p.setColor(QPalette::ButtonText, QColor(0xf0, 0xf0, 0xf0));
+        p.setColor(QPalette::Highlight, QColor(0x3c, 0x7d, 0xf2));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        p.setColor(QPalette::PlaceholderText, QColor(0x9a, 0x9a, 0x9a));
+        p.setColor(QPalette::ToolTipBase, QColor(0x2b, 0x2b, 0x2b));
+        p.setColor(QPalette::ToolTipText, QColor(0xf0, 0xf0, 0xf0));
+    } else {
+        p.setColor(QPalette::Window, QColor(0xf6, 0xf6, 0xf6));
+        p.setColor(QPalette::WindowText, QColor(0x1b, 0x1b, 0x1b));
+        p.setColor(QPalette::Base, Qt::white);
+        p.setColor(QPalette::AlternateBase, QColor(0xf0, 0xf0, 0xf0));
+        p.setColor(QPalette::Text, QColor(0x1b, 0x1b, 0x1b));
+        p.setColor(QPalette::Button, QColor(0xe8, 0xe8, 0xe8));
+        p.setColor(QPalette::ButtonText, QColor(0x1b, 0x1b, 0x1b));
+        p.setColor(QPalette::Highlight, QColor(0x00, 0x66, 0xcc));
+        p.setColor(QPalette::HighlightedText, Qt::white);
+        p.setColor(QPalette::PlaceholderText, QColor(0x8a, 0x8a, 0x8a));
+        p.setColor(QPalette::ToolTipBase, QColor(0xff, 0xff, 0xf0));
+        p.setColor(QPalette::ToolTipText, QColor(0x1b, 0x1b, 0x1b));
+    }
+    return p;
+}
+
+static bool isDarkMode() {
+    QColor c = QApplication::palette().color(QPalette::Window);
+    return (c.red() * 299 + c.green() * 587 + c.blue() * 114) / 1000 < 128;
+}
+
+static void applyFusionDark() {
+    qApp->setStyle(QStyleFactory::create("Fusion"));
+}
+
+class StatsChip : public QFrame {
+public:
+    explicit StatsChip(const QString &title, QWidget *parent = nullptr)
+        : QFrame(parent), m_title(title) {
+        setObjectName("chip");
+        setMinimumHeight(52);
+        QHBoxLayout *lay = new QHBoxLayout(this);
+        lay->setContentsMargins(12, 6, 12, 6);
+        lay->setSpacing(8);
+        QLabel *lab = new QLabel(title, this);
+        lab->setStyleSheet("font-weight:600;");
+        m_value = new QLabel("--", this);
+        m_value->setStyleSheet("font-size:16px;font-weight:600;");
+        m_bar = new QProgressBar(this);
+        m_bar->setRange(0, 1000);
+        m_bar->setTextVisible(false);
+        m_bar->setFixedHeight(8);
+        m_bar->setStyleSheet(
+            "QProgressBar{background:rgba(127,127,127,0.25);border:none;border-radius:4px;}"
+            "QProgressBar::chunk{background:#3c7df2;border-radius:4px;}");
+        lay->addWidget(lab);
+        lay->addWidget(m_value);
+        lay->addWidget(m_bar, 1);
+    }
+    void setPct(double pct, const QString &txt) {
+        m_value->setText(txt);
+        m_bar->setValue((int)(pct * 10.0));
+    }
+private:
+    QString m_title;
+    QLabel *m_value;
+    QProgressBar *m_bar;
+};
+
+static void termCb(const char *t);
+
+class TerminalDialog : public QDialog {
+public:
+    TerminalDialog(QWidget *parent = nullptr) : QDialog(parent) {
+        setWindowTitle("WC Terminal");
+        resize(720, 420);
+        QVBoxLayout *lay = new QVBoxLayout(this);
+        m_out = new QPlainTextEdit(this);
+        m_out->setReadOnly(true);
+        QFont mono("Consolas", 10);
+        m_out->setFont(mono);
+        m_in = new QLineEdit(this);
+        m_in->setPlaceholderText("type a command, e.g. settings display, ipconfig, dir C:\\  (exit to close)");
+        lay->addWidget(m_out, 1);
+        lay->addWidget(m_in);
+        connect(m_in, &QLineEdit::returnPressed, this, [this]() {
+            QString line = m_in->text();
+            m_in->clear();
+            m_out->appendPlainText("wc> " + line);
+            QByteArray ba = line.toUtf8();
+            QcTermExec(ba.constData(), termCb);
+            for (int i = 0; i < (int)m_pending.size(); i++)
+                m_out->appendPlainText(QString::fromUtf8(m_pending[i].c_str()));
+            m_pending.clear();
+            if (g_qcTermClose) {
+                m_out->appendPlainText("Terminal closed.");
+                close();
+            }
+        });
+    }
+public:
+    void appendC(const char *t) { m_pending.emplace_back(t ? t : ""); }
+private:
+    QPlainTextEdit *m_out;
+    QLineEdit *m_in;
+    std::vector<std::string> m_pending;
+};
+
+static TerminalDialog *g_termDlg = nullptr;
+
+static void termCb(const char *t) {
+    if (g_termDlg) g_termDlg->appendC(t);
+}
+
+class FloatWindow : public QWidget {
+public:
+    FloatWindow(QWidget *mainW) : m_main(mainW), m_drag(false) {
+        setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setAttribute(Qt::WA_ShowWithoutActivating);
+        setFixedSize(340, 128);
+
+        QFrame *card = new QFrame(this);
+        card->setObjectName("floatCard");
+        card->setGeometry(4, 4, width() - 8, height() - 8);
+
+        QVBoxLayout *lay = new QVBoxLayout(card);
+        lay->setContentsMargins(12, 8, 12, 8);
+        lay->setSpacing(4);
+
+        QHBoxLayout *top = new QHBoxLayout();
+        QLabel *lab = new QLabel("Windows Control Center", card);
+        lab->setStyleSheet("font-weight:600;font-size:10pt;");
+        top->addWidget(lab);
+        top->addStretch(1);
+        QPushButton *btnOpen = new QPushButton("Open Main", card);
+        btnOpen->setCursor(Qt::PointingHandCursor);
+        btnOpen->setStyleSheet("padding:2px 10px;font-size:9pt;");
+        connect(btnOpen, &QPushButton::clicked, this, [this]() {
+            if (m_main) { m_main->showNormal(); m_main->raise(); m_main->activateWindow(); }
+        });
+        top->addWidget(btnOpen);
+        QPushButton *btnClose = new QPushButton("X", card);
+        btnClose->setCursor(Qt::PointingHandCursor);
+        btnClose->setFixedSize(24, 22);
+        btnClose->setStyleSheet("padding:0;font-size:9pt;");
+        connect(btnClose, &QPushButton::clicked, this, &QWidget::close);
+        top->addWidget(btnClose);
+        lay->addLayout(top);
+
+        m_rows.clear();
+        m_rows.push_back(Row("CPU", new QLabel(card), new QProgressBar(card)));
+        m_rows.push_back(Row("RAM", new QLabel(card), new QProgressBar(card)));
+        m_rows.push_back(Row("DISK", new QLabel(card), new QProgressBar(card)));
+        m_rows.push_back(Row("NET", new QLabel(card), new QProgressBar(card)));
+        for (auto &r : m_rows) {
+            QHBoxLayout *hl = new QHBoxLayout();
+            QLabel *nl = new QLabel(r.name, card);
+            nl->setFixedWidth(40);
+            nl->setStyleSheet("font-size:9pt;font-weight:600;");
+            r.value->setStyleSheet("font-size:9pt;");
+            r.value->setMinimumWidth(110);
+            r.bar->setRange(0, 1000);
+            r.bar->setTextVisible(false);
+            r.bar->setFixedHeight(6);
+            r.bar->setStyleSheet(
+                "QProgressBar{background:rgba(127,127,127,0.25);border:none;border-radius:3px;}"
+                "QProgressBar::chunk{background:#3c7df2;border-radius:3px;}");
+            hl->addWidget(nl);
+            hl->addWidget(r.value);
+            hl->addWidget(r.bar, 1);
+            lay->addLayout(hl);
+        }
+
+        m_timer = new QTimer(this);
+        connect(m_timer, &QTimer::timeout, this, &FloatWindow::refresh);
+        m_timer->start(1000);
+        refresh();
+
+        move(40, 40);
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton) { m_drag = true; m_dragOff = e->globalPosition().toPoint() - frameGeometry().topLeft(); }
+    }
+    void mouseMoveEvent(QMouseEvent *e) override {
+        if (m_drag) move(e->globalPosition().toPoint() - m_dragOff);
+    }
+    void mouseReleaseEvent(QMouseEvent *e) override {
+        if (e->button() == Qt::LeftButton) m_drag = false;
+    }
+
+private:
+    struct Row {
+        QString name;
+        QLabel *value;
+        QProgressBar *bar;
+        Row(const QString &n, QLabel *v, QProgressBar *b) : name(n), value(v), bar(b) {}
+    };
+    void refresh() {
+        QcSample();
+        setRow(0, QString("%1%").arg(QcCpuPct(), 0, 'f', 1), QcCpuPct());
+        setRow(1, QString("%1%").arg(QcRamPct(), 0, 'f', 1), QcRamPct());
+        setRow(2, QString("%1%").arg(QcDiskPct(), 0, 'f', 1), QcDiskPct());
+        setRow(3, QString("v%1 / ^%2 MB/s").arg(QcNetDown() / 1048576.0, 0, 'f', 2)
+                                            .arg(QcNetUp() / 1048576.0, 0, 'f', 2), 0.0);
+    }
+    void setRow(int i, const QString &txt, double pct) {
+        m_rows[i].value->setText(txt);
+        m_rows[i].bar->setValue((int)(pct * 10.0));
+    }
+    QWidget *m_main;
+    QTimer *m_timer;
+    std::vector<Row> m_rows;
+    bool m_drag;
+    QPoint m_dragOff;
+};
+
+static FloatWindow *g_floatWnd = nullptr;
+
+class MainWindow : public QMainWindow {
+public:
+    MainWindow() {
+        setWindowTitle(APP_TITLE);
+        resize(1180, 760);
+        setMinimumSize(920, 620);
+
+        QWidget *central = new QWidget(this);
+        QVBoxLayout *root = new QVBoxLayout(central);
+        root->setContentsMargins(16, 14, 16, 12);
+        root->setSpacing(10);
+
+        buildHeader(root);
+        buildChips(root);
+        buildBody(root);
+        setCentralWidget(central);
+
+        reloadCategories();
+        m_timer = new QTimer(this);
+        connect(m_timer, &QTimer::timeout, this, &MainWindow::refreshChips);
+        m_timer->start(1000);
+    }
+
+private:
+    void buildHeader(QVBoxLayout *root) {
+        QHBoxLayout *h = new QHBoxLayout();
+        h->setSpacing(10);
+        QLabel *title = new QLabel(QString("Windows Control Center"), this);
+        QFont tf = title->font();
+        tf.setPointSize(13);
+        tf.setBold(true);
+        title->setFont(tf);
+        h->addWidget(title);
+        h->addStretch(1);
+        m_search = new QLineEdit(this);
+        m_search->setPlaceholderText("Search commands or descriptions...");
+        m_search->setClearButtonEnabled(true);
+        m_search->setMinimumWidth(300);
+        h->addWidget(m_search);
+
+        QPushButton *btnTools = new QPushButton("System Tools", this);
+        connect(btnTools, &QPushButton::clicked, this, [this]() {
+            QMenu menu(this);
+            menu.addAction("Live Monitor", [this]() { QcOpenTool(0); });
+            menu.addAction("App Uninstaller", [this]() { QcOpenTool(1); });
+            menu.addAction("File Search", [this]() { QcOpenTool(2); });
+            menu.addAction("Wi-Fi Manager", [this]() { QcOpenTool(3); });
+            menu.addAction("Process Manager", [this]() { QcOpenTool(4); });
+            menu.addSeparator();
+            menu.addAction("System Stats (console)", [this]() { QcOpenTool(5); });
+            menu.addAction("List Installed Apps (console)", [this]() { QcOpenTool(6); });
+            menu.addAction("Process List (console)", [this]() { QcOpenTool(7); });
+            menu.addAction("Net Speed (console)", [this]() { QcOpenTool(8); });
+            menu.exec(QCursor::pos());
+        });
+        h->addWidget(btnTools);
+
+        QPushButton *btnTerm = new QPushButton("Terminal", this);
+        connect(btnTerm, &QPushButton::clicked, this, [this]() {
+            g_termDlg = new TerminalDialog(this);
+            g_termDlg->setAttribute(Qt::WA_DeleteOnClose);
+            connect(g_termDlg, &QDialog::finished, this, []() { g_termDlg = nullptr; });
+            g_termDlg->show();
+        });
+        h->addWidget(btnTerm);
+
+        QPushButton *btnFloat = new QPushButton("Float", this);
+        connect(btnFloat, &QPushButton::clicked, this, [this]() {
+            if (g_floatWnd) { g_floatWnd->show(); g_floatWnd->raise(); return; }
+            g_floatWnd = new FloatWindow(this);
+            g_floatWnd->setAttribute(Qt::WA_DeleteOnClose);
+            connect(g_floatWnd, &QWidget::destroyed, this, []() { g_floatWnd = nullptr; });
+            g_floatWnd->show();
+        });
+        h->addWidget(btnFloat);
+
+        QPushButton *btnAbout = new QPushButton("About", this);
+        connect(btnAbout, &QPushButton::clicked, this, [this]() {
+            QMessageBox::about(this, APP_TITLE,
+                "Windows Control Center - All-in-one Windows control center.\n\n"
+                "Pure C core with a Qt front-end.\n"
+                "Follows the Windows system theme (light/dark).");
+        });
+        h->addWidget(btnAbout);
+        root->addLayout(h);
+    }
+
+    void buildChips(QVBoxLayout *root) {
+        QHBoxLayout *h = new QHBoxLayout();
+        h->setSpacing(8);
+        m_cpu = new StatsChip("CPU", this);
+        m_ram = new StatsChip("RAM", this);
+        m_disk = new StatsChip("DISK", this);
+        m_net = new StatsChip("NET", this);
+        m_uptime = new StatsChip("UPTIME", this);
+        h->addWidget(m_cpu, 1);
+        h->addWidget(m_ram, 1);
+        h->addWidget(m_disk, 1);
+        h->addWidget(m_net, 1);
+        h->addWidget(m_uptime, 1);
+        root->addLayout(h);
+    }
+
+    void buildBody(QVBoxLayout *root) {
+        QHBoxLayout *h = new QHBoxLayout();
+        h->setSpacing(10);
+
+        m_catList = new QListWidget(this);
+        m_catList->setObjectName("catList");
+        m_catList->setFixedWidth(230);
+        connect(m_catList, &QListWidget::currentRowChanged, this, &MainWindow::reloadCommands);
+        h->addWidget(m_catList);
+
+        QVBoxLayout *right = new QVBoxLayout();
+        right->setSpacing(6);
+        m_cmdList = new QListWidget(this);
+        m_cmdList->setObjectName("cmdList");
+        connect(m_cmdList, &QListWidget::currentRowChanged, this, &MainWindow::showDetail);
+        connect(m_cmdList, &QListWidget::itemDoubleClicked, this,
+                [this](QListWidgetItem *it) { runCmd(it); });
+        right->addWidget(m_cmdList, 1);
+
+        QHBoxLayout *ctl = new QHBoxLayout();
+        m_detail = new QTextEdit(this);
+        m_detail->setReadOnly(true);
+        m_detail->setMaximumHeight(150);
+        m_detail->setPlaceholderText("Select a command to see its description.");
+        ctl->addWidget(m_detail, 1);
+        m_runBtn = new QPushButton("Run", this);
+        m_runBtn->setMinimumWidth(110);
+        m_runBtn->setMinimumHeight(34);
+        connect(m_runBtn, &QPushButton::clicked, this, [this]() {
+            QListWidgetItem *it = m_cmdList->currentItem();
+            if (it) runCmd(it);
+        });
+        ctl->addWidget(m_runBtn);
+        right->addLayout(ctl);
+        h->addLayout(right, 1);
+        root->addLayout(h, 1);
+
+        QLabel *status = new QLabel(this);
+        status->setText(QString("%1 categories, %2 commands").arg(QcCategoryCount()).arg(QcTotalCommands()));
+        status->setStyleSheet("color:rgba(127,127,127,0.9);");
+        root->addWidget(status);
+
+        connect(m_search, &QLineEdit::textChanged, this, &MainWindow::reloadCategories);
+    }
+
+    void reloadCategories() {
+        QString q = m_search->text().trimmed();
+        QString cur = m_catList->currentItem() ? m_catList->currentItem()->text() : QString();
+        m_catList->blockSignals(true);
+        m_catList->clear();
+        int n = QcCategoryCount();
+        m_catIdx.clear();
+        std::vector<std::pair<QString,int>> cats;
+        for (int i = 0; i < n; i++) {
+            int cnt = QcCategoryCommandCount(i);
+            if (cnt == 0) continue;
+            if (!q.isEmpty()) {
+                bool any = false;
+                for (int j = 0; j < cnt; j++) {
+                    QString nm = QString::fromUtf8(QcCommandName(i, j));
+                    QString ds = QString::fromUtf8(QcCommandDesc(i, j));
+                    if (nm.contains(q, Qt::CaseInsensitive) || ds.contains(q, Qt::CaseInsensitive)) { any = true; break; }
+                }
+                if (!any) continue;
+            }
+            cats.emplace_back(QString::fromUtf8(QcCategoryName(i)), i);
+        }
+        int selRow = -1;
+        for (size_t k = 0; k < cats.size(); k++) {
+            m_catList->addItem(QString("%1  (%2)").arg(cats[k].first).arg(QcCategoryCommandCount(cats[k].second)));
+            m_catIdx.push_back(cats[k].second);
+            if (!cur.isEmpty() && cats[k].first == cur) selRow = (int)k;
+        }
+        m_catList->blockSignals(false);
+        if (selRow >= 0) m_catList->setCurrentRow(selRow);
+        else if (m_catList->count() > 0) m_catList->setCurrentRow(0);
+        reloadCommands();
+    }
+
+    void reloadCommands() {
+        int row = m_catList->currentRow();
+        int cat = (row >= 0 && row < (int)m_catIdx.size()) ? m_catIdx[row] : -1;
+        m_cmdList->blockSignals(true);
+        m_cmdList->clear();
+        m_cmds.clear();
+        QString q = m_search->text().trimmed();
+        if (cat >= 0) {
+            int cnt = QcCategoryCommandCount(cat);
+            for (int j = 0; j < cnt; j++) {
+                QString nm = QString::fromUtf8(QcCommandName(cat, j));
+                QString ds = QString::fromUtf8(QcCommandDesc(cat, j));
+                if (!q.isEmpty() && !nm.contains(q, Qt::CaseInsensitive) && !ds.contains(q, Qt::CaseInsensitive))
+                    continue;
+                CmdRef c;
+                c.cat = cat; c.idx = j;
+                c.name = nm; c.desc = ds;
+                c.needsArg = QcCommandNeedsArg(cat, j) != 0;
+                c.detail = QString::fromUtf8(QcCommandDetail(cat, j));
+                m_cmds.push_back(c);
+                QString label = nm;
+                if (c.needsArg) label += "  [ARG]";
+                QListWidgetItem *it = new QListWidgetItem(label, m_cmdList);
+                it->setToolTip(ds);
+            }
+        }
+        m_cmdList->blockSignals(false);
+        if (m_cmdList->count() > 0) m_cmdList->setCurrentRow(0);
+    }
+
+    void showDetail() {
+        QListWidgetItem *it = m_cmdList->currentItem();
+        if (!it) { m_detail->clear(); return; }
+        int row = m_cmdList->row(it);
+        if (row < 0 || row >= (int)m_cmds.size()) return;
+        const CmdRef &c = m_cmds[row];
+        QString text = QString("<b>%1</b>  (%2)<br><br><i>%3</i>").arg(
+            c.name.toHtmlEscaped(), c.needsArg ? "needs argument" : "no argument",
+            c.desc.toHtmlEscaped());
+        if (!c.detail.isEmpty())
+            text += QString("<br><br>%1").arg(c.detail.toHtmlEscaped().replace('\n', "<br>"));
+        m_detail->setHtml(text);
+    }
+
+    void runCmd(QListWidgetItem *it) {
+        int row = m_cmdList->row(it);
+        if (row < 0 || row >= (int)m_cmds.size()) return;
+        const CmdRef &c = m_cmds[row];
+        if (c.needsArg) {
+            bool ok = false;
+            QString arg = QInputDialog::getText(this, "Argument for " + c.name,
+                                                "Argument (mask|root for find-files):", QLineEdit::Normal, "", &ok);
+            if (!ok) return;
+            QByteArray ba = arg.toUtf8();
+            QcRunCommand(c.cat, c.idx, ba.constData());
+        } else {
+            QcRunCommand(c.cat, c.idx, nullptr);
+        }
+    }
+
+    void refreshChips() {
+        QcSample();
+        m_cpu->setPct(QcCpuPct(), QString("%1%").arg(QcCpuPct(), 0, 'f', 1));
+        m_ram->setPct(QcRamPct(), QString("%1%").arg(QcRamPct(), 0, 'f', 1));
+        m_disk->setPct(QcDiskPct(), QString("%1%").arg(QcDiskPct(), 0, 'f', 1));
+        m_net->setPct(0.0, QString("v%1 / ^%2 MB/s")
+            .arg(QcNetDown() / 1048576.0, 0, 'f', 2)
+            .arg(QcNetUp() / 1048576.0, 0, 'f', 2));
+        m_uptime->setPct(0.0, QString::fromUtf8(QcUptime()));
+    }
+
+    QLineEdit *m_search = nullptr;
+    QListWidget *m_catList = nullptr;
+    QListWidget *m_cmdList = nullptr;
+    QTextEdit *m_detail = nullptr;
+    QPushButton *m_runBtn = nullptr;
+    StatsChip *m_cpu = nullptr, *m_ram = nullptr, *m_disk = nullptr, *m_net = nullptr, *m_uptime = nullptr;
+    QTimer *m_timer = nullptr;
+    std::vector<CmdRef> m_cmds;
+    std::vector<int> m_catIdx;
+};
+
+int main(int argc, char *argv[]) {
+    QApplication app(argc, argv);
+    app.setApplicationName("WindowsControl");
+    app.setOrganizationName("WindowsControl");
+    app.setStyle(QStyleFactory::create("Fusion"));
+
+    QPalette pal = makePalette(isDarkMode());
+    app.setPalette(pal);
+
+    app.setStyleSheet(
+        "QWidget{font-family:'Segoe UI';font-size:10pt;}"
+        "QPushButton{background:rgba(127,127,127,0.18);border:none;border-radius:6px;padding:6px 14px;}"
+        "QPushButton:hover{background:rgba(127,127,127,0.30);}"
+        "QPushButton:pressed{background:rgba(127,127,127,0.42);}"
+        "QLineEdit,QTextEdit{background:rgba(127,127,127,0.12);border:1px solid rgba(127,127,127,0.25);border-radius:6px;padding:6px 8px;selection-background-color:#3c7df2;}"
+        "QLineEdit:focus,QTextEdit:focus{border:1px solid #3c7df2;}"
+        "QListWidget{background:rgba(127,127,127,0.08);border:1px solid rgba(127,127,127,0.22);border-radius:8px;padding:4px;outline:0;}"
+        "QListWidget::item{border-radius:6px;padding:5px 8px;margin:1px;}"
+        "QListWidget::item:selected{background:#3c7df2;color:white;}"
+        "QListWidget::item:hover:!selected{background:rgba(127,127,127,0.20);}"
+        "#chip{background:rgba(127,127,127,0.10);border:1px solid rgba(127,127,127,0.20);border-radius:10px;}"
+        "#floatCard{background:rgba(30,30,30,0.96);border:1px solid rgba(127,127,127,0.35);border-radius:12px;}"
+        "QMenu{background:rgba(32,32,32,0.97);border:1px solid rgba(127,127,127,0.3);border-radius:8px;padding:6px;}"
+        "QMenu::item{padding:6px 24px 6px 10px;border-radius:5px;}"
+        "QMenu::item:selected{background:#3c7df2;color:white;}"
+        "QInputDialog QLineEdit{min-width:280px;}"
+        "QScrollBar:vertical{width:10px;background:transparent;}"
+        "QScrollBar::handle:vertical{background:rgba(127,127,127,0.4);border-radius:5px;min-height:30px;}"
+        "QScrollBar::handle:vertical:hover{background:rgba(127,127,127,0.6);}"
+        "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0;}"
+        "QScrollBar::add-page:vertical,QScrollBar::sub-page:vertical{background:transparent;}");
+
+    MainWindow w;
+    w.show();
+    return app.exec();
+}
